@@ -75,7 +75,6 @@ class PrelaunchTargetPropagation:
     time_history: NDArray[np.float64]
     target_position_history_ned: NDArray[np.float64]
     target_velocity_history_ned: NDArray[np.float64]
-    range_to_intercept_history: NDArray[np.float64]
 
 
 @dataclass
@@ -324,7 +323,6 @@ def compute_time_to_minimum_distance_from_point(
 def compute_prelaunch_target_propagation(
     target_position_ned: Vector3,
     target_velocity_ned: Vector3,
-    intercept_point_ned: Vector3,
     start_time: float,
     propagation_duration: float,
 ) -> PrelaunchTargetPropagation:
@@ -347,16 +345,11 @@ def compute_prelaunch_target_propagation(
         sample_count,
         axis=0,
     )
-    range_to_intercept_history = np.linalg.norm(
-        intercept_point_ned - target_position_history_ned,
-        axis=1,
-    )
 
     return PrelaunchTargetPropagation(
         time_history=time_history,
         target_position_history_ned=target_position_history_ned,
         target_velocity_history_ned=target_velocity_history_ned,
-        range_to_intercept_history=range_to_intercept_history,
     )
 
 
@@ -954,7 +947,6 @@ def run_simulation(config: SimulationConfig) -> SimulationResult:
                 target_velocity_ned=compute_constant_heading_velocity_ned(
                     config.target
                 ),
-                intercept_point_ned=config.vehicle.waypoints_ned[-1],
                 start_time=0.0,
                 propagation_duration=(
                     target_time_to_vehicle_final_waypoint_poca
@@ -1034,7 +1026,6 @@ def run_simulation(config: SimulationConfig) -> SimulationResult:
                     compute_prelaunch_target_propagation(
                         target_position_ned=target_state.position_ned,
                         target_velocity_ned=target_velocity_ned,
-                        intercept_point_ned=config.vehicle.waypoints_ned[-1],
                         start_time=poca_time,
                         propagation_duration=(
                             target_time_to_vehicle_final_waypoint_poca
@@ -1379,39 +1370,21 @@ def write_prelaunch_target_propagations_out(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     variable_names = [
-        "time",
-        "vehiclePositionEast",
-        "vehiclePositionNorth",
-        "vehiclePositionUp",
-        "vehicleVelocityEast",
-        "vehicleVelocityNorth",
-        "vehicleVelocityUp",
         "targetPositionEast",
         "targetPositionNorth",
         "targetPositionUp",
         "targetVelocityEast",
         "targetVelocityNorth",
         "targetVelocityUp",
-        "vehicleToTargetRange",
-        "integratedPNActive",
     ]
 
     variable_units = [
-        "s",
         "m",
         "m",
         "m",
         "m/s",
         "m/s",
         "m/s",
-        "m",
-        "m",
-        "m",
-        "m/s",
-        "m/s",
-        "m/s",
-        "m",
-        "nd",
     ]
 
     with output_path.open("w", encoding="utf-8", newline="\n") as output_file:
@@ -1421,9 +1394,6 @@ def write_prelaunch_target_propagations_out(
             f"Scenario Title: {config.scenario_title} "
             f"Classification: {config.classification}\n"
         )
-
-        vehicle_position_enu = ned_to_enu(config.vehicle.waypoints_ned[-1])
-        vehicle_velocity_enu = np.zeros(3, dtype=np.float64)
 
         for propagation_index, propagation in enumerate(
             result.prelaunch_target_propagations,
@@ -1446,21 +1416,12 @@ def write_prelaunch_target_propagations_out(
                 )
 
                 row = [
-                    propagation.time_history[sample_index],
-                    vehicle_position_enu[0],
-                    vehicle_position_enu[1],
-                    vehicle_position_enu[2],
-                    vehicle_velocity_enu[0],
-                    vehicle_velocity_enu[1],
-                    vehicle_velocity_enu[2],
                     target_position_enu[0],
                     target_position_enu[1],
                     target_position_enu[2],
                     target_velocity_enu[0],
                     target_velocity_enu[1],
                     target_velocity_enu[2],
-                    propagation.range_to_intercept_history[sample_index],
-                    0.0,
                 ]
 
                 output_file.write(
