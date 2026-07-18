@@ -295,10 +295,18 @@ def align_vehicle_penultimate_waypoint_with_target_approach(
         )
 
     target_direction_ned = target_velocity_ned / target_speed
-
-    config.vehicle.waypoints_ned[-2] = (
+    updated_penultimate_waypoint_ned = (
         vehicle_final_waypoint_ned + target_direction_ned * final_leg_length
     )
+
+    print(
+        "Updated vehicle penultimate waypoint at "
+        f"NED [{updated_penultimate_waypoint_ned[0]:.9f}, "
+        f"{updated_penultimate_waypoint_ned[1]:.9f}, "
+        f"{updated_penultimate_waypoint_ned[2]:.9f}]"
+    )
+
+    config.vehicle.waypoints_ned[-2] = updated_penultimate_waypoint_ned
 
 
 def compute_time_to_minimum_distance_from_point(
@@ -353,18 +361,30 @@ def compute_prelaunch_target_propagation(
     )
 
 
+def has_vehicle_reached_penultimate_waypoint(
+    config: SimulationConfig,
+    vehicle_state: EntityState,
+) -> bool:
+    """Return whether the vehicle has reached or passed penultimate waypoint."""
+    penultimate_waypoint_index = len(config.vehicle.waypoints_ned) - 2
+
+    return vehicle_state.waypoint_index > penultimate_waypoint_index
+
+
 def update_target_prediction_and_vehicle_waypoint(
     config: SimulationConfig,
     target_position_ned: Vector3,
     target_velocity_ned: Vector3,
     current_time: float,
     prelaunch_target_propagations: list[PrelaunchTargetPropagation],
+    update_penultimate_waypoint: bool,
 ) -> tuple[float, float, float]:
-    """Update target propagation and vehicle penultimate waypoint."""
-    align_vehicle_penultimate_waypoint_with_target_approach(
-        config,
-        target_velocity_ned,
-    )
+    """Update target propagation and optionally vehicle penultimate waypoint."""
+    if update_penultimate_waypoint:
+        align_vehicle_penultimate_waypoint_with_target_approach(
+            config,
+            target_velocity_ned,
+        )
     (
         target_time_to_vehicle_final_waypoint_poca,
         vehicle_time_to_final_waypoint,
@@ -1054,6 +1074,7 @@ def run_simulation(config: SimulationConfig) -> SimulationResult:
                     target_velocity_ned=target_velocity_ned,
                     current_time=poca_time,
                     prelaunch_target_propagations=prelaunch_target_propagations,
+                    update_penultimate_waypoint=True,
                 )
                 next_launch_time_recompute = (
                     poca_time + LAUNCH_RECOMPUTE_INTERVAL_S
@@ -1113,6 +1134,12 @@ def run_simulation(config: SimulationConfig) -> SimulationResult:
                 target_velocity_ned=target_velocity_ned,
                 current_time=current_time,
                 prelaunch_target_propagations=prelaunch_target_propagations,
+                update_penultimate_waypoint=(
+                    not has_vehicle_reached_penultimate_waypoint(
+                        config,
+                        vehicle_state,
+                    )
+                ),
             )
             next_launch_time_recompute = (
                 current_time + LAUNCH_RECOMPUTE_INTERVAL_S
