@@ -353,6 +353,44 @@ def compute_prelaunch_target_propagation(
     )
 
 
+def update_target_prediction_and_vehicle_waypoint(
+    config: SimulationConfig,
+    target_position_ned: Vector3,
+    target_velocity_ned: Vector3,
+    current_time: float,
+    prelaunch_target_propagations: list[PrelaunchTargetPropagation],
+) -> tuple[float, float, float]:
+    """Update target propagation and vehicle penultimate waypoint."""
+    align_vehicle_penultimate_waypoint_with_target_approach(
+        config,
+        target_velocity_ned,
+    )
+    (
+        target_time_to_vehicle_final_waypoint_poca,
+        vehicle_time_to_final_waypoint,
+        synchronized_vehicle_launch_time,
+    ) = compute_synchronized_vehicle_launch_timing_from_target_state(
+        config=config,
+        target_position_ned=target_position_ned,
+        target_velocity_ned=target_velocity_ned,
+        current_time=current_time,
+    )
+    prelaunch_target_propagations.append(
+        compute_prelaunch_target_propagation(
+            target_position_ned=target_position_ned,
+            target_velocity_ned=target_velocity_ned,
+            start_time=current_time,
+            propagation_duration=target_time_to_vehicle_final_waypoint_poca,
+        )
+    )
+
+    return (
+        target_time_to_vehicle_final_waypoint_poca,
+        vehicle_time_to_final_waypoint,
+        synchronized_vehicle_launch_time,
+    )
+
+
 def compute_path_time_to_final_waypoint(config: GuidanceConfig) -> float:
     """Return travel time from initial position through all waypoints."""
     path_points = np.vstack((config.initial_position_ned, config.waypoints_ned))
@@ -1006,31 +1044,16 @@ def run_simulation(config: SimulationConfig) -> SimulationResult:
                 poca_time >= next_launch_time_recompute
                 and poca_time < config.vehicle_launch_time
             ):
-                align_vehicle_penultimate_waypoint_with_target_approach(
-                    config,
-                    target_velocity_ned,
-                )
                 (
                     target_time_to_vehicle_final_waypoint_poca,
                     vehicle_time_to_final_waypoint,
                     config.vehicle_launch_time,
-                ) = (
-                    compute_synchronized_vehicle_launch_timing_from_target_state(
-                        config=config,
-                        target_position_ned=target_state.position_ned,
-                        target_velocity_ned=target_velocity_ned,
-                        current_time=poca_time,
-                    )
-                )
-                prelaunch_target_propagations.append(
-                    compute_prelaunch_target_propagation(
-                        target_position_ned=target_state.position_ned,
-                        target_velocity_ned=target_velocity_ned,
-                        start_time=poca_time,
-                        propagation_duration=(
-                            target_time_to_vehicle_final_waypoint_poca
-                        ),
-                    )
+                ) = update_target_prediction_and_vehicle_waypoint(
+                    config=config,
+                    target_position_ned=target_state.position_ned,
+                    target_velocity_ned=target_velocity_ned,
+                    current_time=poca_time,
+                    prelaunch_target_propagations=prelaunch_target_propagations,
                 )
                 next_launch_time_recompute = (
                     poca_time + LAUNCH_RECOMPUTE_INTERVAL_S
@@ -1075,6 +1098,25 @@ def run_simulation(config: SimulationConfig) -> SimulationResult:
                 vehicle_state.commanded_heading_rad,
                 vehicle_state.commanded_flight_path_angle_rad,
             ) = velocity_angles_ned(vehicle_state.velocity_ned)
+
+        if (
+            not vehicle_state.terminal_guidance_active
+            and current_time >= next_launch_time_recompute
+        ):
+            (
+                target_time_to_vehicle_final_waypoint_poca,
+                vehicle_time_to_final_waypoint,
+                _synchronized_vehicle_launch_time,
+            ) = update_target_prediction_and_vehicle_waypoint(
+                config=config,
+                target_position_ned=target_state.position_ned,
+                target_velocity_ned=target_velocity_ned,
+                current_time=current_time,
+                prelaunch_target_propagations=prelaunch_target_propagations,
+            )
+            next_launch_time_recompute = (
+                current_time + LAUNCH_RECOMPUTE_INTERVAL_S
+            )
 
         if vehicle_state.terminal_guidance_active:
             (
