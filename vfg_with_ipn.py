@@ -84,6 +84,8 @@ class SimulationResult:
     vehicle_velocity_history_ned: NDArray[np.float64]
     target_position_history_ned: NDArray[np.float64]
     target_velocity_history_ned: NDArray[np.float64]
+    vehicle_penultimate_waypoint_history_ned: NDArray[np.float64]
+    vehicle_final_waypoint_history_ned: NDArray[np.float64]
     range_history: NDArray[np.float64]
     terminal_guidance_history: NDArray[np.float64]
     poca_time: float
@@ -295,10 +297,100 @@ def align_vehicle_penultimate_waypoint_with_target_approach(
         )
 
     target_direction_ned = target_velocity_ned / target_speed
-
-    config.vehicle.waypoints_ned[-2] = (
+    updated_penultimate_waypoint_ned = (
         vehicle_final_waypoint_ned + target_direction_ned * final_leg_length
     )
+
+    print(
+        "Updated vehicle penultimate waypoint at "
+        f"NED [{updated_penultimate_waypoint_ned[0]:.9f}, "
+        f"{updated_penultimate_waypoint_ned[1]:.9f}, "
+        f"{updated_penultimate_waypoint_ned[2]:.9f}]"
+    )
+
+    config.vehicle.waypoints_ned[-2] = updated_penultimate_waypoint_ned
+
+
+def compute_time_to_intercept_moving_target(
+    vehicle_position_ned: Vector3,
+    vehicle_speed: float,
+    target_position_ned: Vector3,
+    target_velocity_ned: Vector3,
+) -> float:
+    """Return earliest nonnegative intercept time for a constant-speed vehicle."""
+    relative_position_ned = target_position_ned - vehicle_position_ned
+    target_speed_squared = float(np.dot(target_velocity_ned, target_velocity_ned))
+    closing_quadratic_coefficient = target_speed_squared - vehicle_speed**2
+    linear_coefficient = 2.0 * float(
+        np.dot(relative_position_ned, target_velocity_ned)
+    )
+    constant_coefficient = float(
+        np.dot(relative_position_ned, relative_position_ned)
+    )
+
+    if abs(closing_quadratic_coefficient) <= SMALL_NUMBER:
+        if abs(linear_coefficient) <= SMALL_NUMBER:
+            return 0.0
+
+        intercept_time = -constant_coefficient / linear_coefficient
+        return max(0.0, intercept_time)
+
+    discriminant = (
+        linear_coefficient**2
+        - 4.0 * closing_quadratic_coefficient * constant_coefficient
+    )
+
+    if discriminant < 0.0:
+        return compute_time_to_minimum_distance_from_point(
+            initial_position_ned=target_position_ned,
+            velocity_ned=target_velocity_ned,
+            point_ned=vehicle_position_ned,
+        )
+
+    discriminant_root = math.sqrt(discriminant)
+    intercept_times = [
+        (-linear_coefficient - discriminant_root)
+        / (2.0 * closing_quadratic_coefficient),
+        (-linear_coefficient + discriminant_root)
+        / (2.0 * closing_quadratic_coefficient),
+    ]
+    future_intercept_times = [
+        intercept_time
+        for intercept_time in intercept_times
+        if intercept_time >= 0.0
+    ]
+
+    if not future_intercept_times:
+        return 0.0
+
+    return min(future_intercept_times)
+
+
+def update_vehicle_final_waypoint_to_predicted_intercept(
+    config: SimulationConfig,
+    vehicle_position_ned: Vector3,
+    target_position_ned: Vector3,
+    target_velocity_ned: Vector3,
+) -> None:
+    """Move final waypoint to target position at predicted intercept time."""
+    target_time_to_intercept = compute_time_to_intercept_moving_target(
+        vehicle_position_ned=vehicle_position_ned,
+        vehicle_speed=config.vehicle.desired_flight_speed,
+        target_position_ned=target_position_ned,
+        target_velocity_ned=target_velocity_ned,
+    )
+    updated_final_waypoint_ned = (
+        target_position_ned + target_velocity_ned * target_time_to_intercept
+    )
+
+    print(
+        "Updated vehicle final waypoint at "
+        f"NED [{updated_final_waypoint_ned[0]:.9f}, "
+        f"{updated_final_waypoint_ned[1]:.9f}, "
+        f"{updated_final_waypoint_ned[2]:.9f}]"
+    )
+
+    config.vehicle.waypoints_ned[-1] = updated_final_waypoint_ned
 
 
 def compute_time_to_minimum_distance_from_point(
@@ -350,6 +442,70 @@ def compute_prelaunch_target_propagation(
         time_history=time_history,
         target_position_history_ned=target_position_history_ned,
         target_velocity_history_ned=target_velocity_history_ned,
+    )
+
+
+def has_vehicle_reached_penultimate_waypoint(
+    config: SimulationConfig,
+    vehicle_state: EntityState,
+) -> bool:
+    """Return whether the vehicle has reached or passed penultimate waypoint."""
+    penultimate_waypoint_index = len(config.vehicle.waypoints_ned) - 2
+
+    return vehicle_state.waypoint_index > penultimate_waypoint_index
+
+
+def update_target_prediction_and_vehicle_waypoint(
+    config: SimulationConfig,
+    target_position_ned: Vector3,
+    target_velocity_ned: Vector3,
+    current_time: float,
+    prelaunch_target_propagations: list[PrelaunchTargetPropagation],
+    update_penultimate_waypoint: bool,
+    update_final_waypoint: bool,
+    vehicle_position_ned: Vector3 | None = None,
+) -> tuple[float, float, float]:
+    """Update target propagation and optionally vehicle waypoints."""
+    if update_penultimate_waypoint:
+        align_vehicle_penultimate_waypoint_with_target_approach(
+            config,
+            target_velocity_ned,
+        )
+    elif update_final_waypoint:
+        if vehicle_position_ned is None:
+            raise ValueError(
+                "Vehicle position is required to update final waypoint."
+            )
+
+        update_vehicle_final_waypoint_to_predicted_intercept(
+            config=config,
+            vehicle_position_ned=vehicle_position_ned,
+            target_position_ned=target_position_ned,
+            target_velocity_ned=target_velocity_ned,
+        )
+    (
+        target_time_to_vehicle_final_waypoint_poca,
+        vehicle_time_to_final_waypoint,
+        synchronized_vehicle_launch_time,
+    ) = compute_synchronized_vehicle_launch_timing_from_target_state(
+        config=config,
+        target_position_ned=target_position_ned,
+        target_velocity_ned=target_velocity_ned,
+        current_time=current_time,
+    )
+    prelaunch_target_propagations.append(
+        compute_prelaunch_target_propagation(
+            target_position_ned=target_position_ned,
+            target_velocity_ned=target_velocity_ned,
+            start_time=current_time,
+            propagation_duration=target_time_to_vehicle_final_waypoint_poca,
+        )
+    )
+
+    return (
+        target_time_to_vehicle_final_waypoint_poca,
+        vehicle_time_to_final_waypoint,
+        synchronized_vehicle_launch_time,
     )
 
 
@@ -905,6 +1061,12 @@ def run_simulation(config: SimulationConfig) -> SimulationResult:
     target_velocity_history_ned = np.zeros(
         (maximum_samples, 3), dtype=np.float64
     )
+    vehicle_penultimate_waypoint_history_ned = np.zeros(
+        (maximum_samples, 3), dtype=np.float64
+    )
+    vehicle_final_waypoint_history_ned = np.zeros(
+        (maximum_samples, 3), dtype=np.float64
+    )
     range_history = np.zeros(maximum_samples, dtype=np.float64)
     terminal_guidance_history = np.zeros(
         maximum_samples, dtype=np.float64
@@ -919,6 +1081,10 @@ def run_simulation(config: SimulationConfig) -> SimulationResult:
 
     vehicle_position_history_ned[0] = vehicle_state.position_ned
     target_position_history_ned[0] = target_state.position_ned
+    vehicle_penultimate_waypoint_history_ned[0] = (
+        config.vehicle.waypoints_ned[-2]
+    )
+    vehicle_final_waypoint_history_ned[0] = config.vehicle.waypoints_ned[-1]
     range_history[0] = np.linalg.norm(
         target_state.position_ned - vehicle_state.position_ned
     )
@@ -988,6 +1154,12 @@ def run_simulation(config: SimulationConfig) -> SimulationResult:
                 target_state.position_ned
             )
             target_velocity_history_ned[sample_index] = target_velocity_ned
+            vehicle_penultimate_waypoint_history_ned[sample_index] = (
+                config.vehicle.waypoints_ned[-2]
+            )
+            vehicle_final_waypoint_history_ned[sample_index] = (
+                config.vehicle.waypoints_ned[-1]
+            )
 
             relative_position_at_sample = (
                 target_state.position_ned - vehicle_state.position_ned
@@ -1006,31 +1178,24 @@ def run_simulation(config: SimulationConfig) -> SimulationResult:
                 poca_time >= next_launch_time_recompute
                 and poca_time < config.vehicle_launch_time
             ):
-                align_vehicle_penultimate_waypoint_with_target_approach(
-                    config,
-                    target_velocity_ned,
-                )
                 (
                     target_time_to_vehicle_final_waypoint_poca,
                     vehicle_time_to_final_waypoint,
                     config.vehicle_launch_time,
-                ) = (
-                    compute_synchronized_vehicle_launch_timing_from_target_state(
-                        config=config,
-                        target_position_ned=target_state.position_ned,
-                        target_velocity_ned=target_velocity_ned,
-                        current_time=poca_time,
-                    )
+                ) = update_target_prediction_and_vehicle_waypoint(
+                    config=config,
+                    target_position_ned=target_state.position_ned,
+                    target_velocity_ned=target_velocity_ned,
+                    current_time=poca_time,
+                    prelaunch_target_propagations=prelaunch_target_propagations,
+                    update_penultimate_waypoint=True,
+                    update_final_waypoint=False,
                 )
-                prelaunch_target_propagations.append(
-                    compute_prelaunch_target_propagation(
-                        target_position_ned=target_state.position_ned,
-                        target_velocity_ned=target_velocity_ned,
-                        start_time=poca_time,
-                        propagation_duration=(
-                            target_time_to_vehicle_final_waypoint_poca
-                        ),
-                    )
+                vehicle_penultimate_waypoint_history_ned[sample_index] = (
+                    config.vehicle.waypoints_ned[-2]
+                )
+                vehicle_final_waypoint_history_ned[sample_index] = (
+                    config.vehicle.waypoints_ned[-1]
                 )
                 next_launch_time_recompute = (
                     poca_time + LAUNCH_RECOMPUTE_INTERVAL_S
@@ -1075,6 +1240,43 @@ def run_simulation(config: SimulationConfig) -> SimulationResult:
                 vehicle_state.commanded_heading_rad,
                 vehicle_state.commanded_flight_path_angle_rad,
             ) = velocity_angles_ned(vehicle_state.velocity_ned)
+
+        if (
+            not vehicle_state.terminal_guidance_active
+            and current_time >= next_launch_time_recompute
+        ):
+            (
+                target_time_to_vehicle_final_waypoint_poca,
+                vehicle_time_to_final_waypoint,
+                _synchronized_vehicle_launch_time,
+            ) = update_target_prediction_and_vehicle_waypoint(
+                config=config,
+                target_position_ned=target_state.position_ned,
+                target_velocity_ned=target_velocity_ned,
+                current_time=current_time,
+                prelaunch_target_propagations=prelaunch_target_propagations,
+                update_penultimate_waypoint=(
+                    not has_vehicle_reached_penultimate_waypoint(
+                        config,
+                        vehicle_state,
+                    )
+                ),
+                update_final_waypoint=has_vehicle_reached_penultimate_waypoint(
+                    config,
+                    vehicle_state,
+                ),
+                vehicle_position_ned=vehicle_state.position_ned,
+            )
+            current_sample_index = valid_sample_count - 1
+            vehicle_penultimate_waypoint_history_ned[current_sample_index] = (
+                config.vehicle.waypoints_ned[-2]
+            )
+            vehicle_final_waypoint_history_ned[current_sample_index] = (
+                config.vehicle.waypoints_ned[-1]
+            )
+            next_launch_time_recompute = (
+                current_time + LAUNCH_RECOMPUTE_INTERVAL_S
+            )
 
         if vehicle_state.terminal_guidance_active:
             (
@@ -1213,6 +1415,12 @@ def run_simulation(config: SimulationConfig) -> SimulationResult:
         vehicle_velocity_history_ned[sample_index] = vehicle_velocity_ned
         target_position_history_ned[sample_index] = target_state.position_ned
         target_velocity_history_ned[sample_index] = target_velocity_ned
+        vehicle_penultimate_waypoint_history_ned[sample_index] = (
+            config.vehicle.waypoints_ned[-2]
+        )
+        vehicle_final_waypoint_history_ned[sample_index] = (
+            config.vehicle.waypoints_ned[-1]
+        )
 
         relative_position_at_sample = (
             target_state.position_ned - vehicle_state.position_ned
@@ -1250,6 +1458,12 @@ def run_simulation(config: SimulationConfig) -> SimulationResult:
         ),
         target_velocity_history_ned=(
             target_velocity_history_ned[:valid_sample_count]
+        ),
+        vehicle_penultimate_waypoint_history_ned=(
+            vehicle_penultimate_waypoint_history_ned[:valid_sample_count]
+        ),
+        vehicle_final_waypoint_history_ned=(
+            vehicle_final_waypoint_history_ned[:valid_sample_count]
         ),
         range_history=range_history[:valid_sample_count],
         terminal_guidance_history=(
@@ -1290,6 +1504,12 @@ def write_translational_state_out(
         "targetVelocityEast",
         "targetVelocityNorth",
         "targetVelocityUp",
+        "vehiclePenultimateWaypointEast",
+        "vehiclePenultimateWaypointNorth",
+        "vehiclePenultimateWaypointUp",
+        "vehicleFinalWaypointEast",
+        "vehicleFinalWaypointNorth",
+        "vehicleFinalWaypointUp",
         "vehicleToTargetRange",
         "integratedPNActive",
     ]
@@ -1308,6 +1528,12 @@ def write_translational_state_out(
         "m/s",
         "m/s",
         "m/s",
+        "m",
+        "m",
+        "m",
+        "m",
+        "m",
+        "m",
         "m",
         "nd",
     ]
@@ -1337,6 +1563,12 @@ def write_translational_state_out(
             target_velocity_enu = ned_to_enu(
                 result.target_velocity_history_ned[sample_index]
             )
+            vehicle_penultimate_waypoint_enu = ned_to_enu(
+                result.vehicle_penultimate_waypoint_history_ned[sample_index]
+            )
+            vehicle_final_waypoint_enu = ned_to_enu(
+                result.vehicle_final_waypoint_history_ned[sample_index]
+            )
 
             row = [
                 result.time_history[sample_index],
@@ -1352,6 +1584,12 @@ def write_translational_state_out(
                 target_velocity_enu[0],
                 target_velocity_enu[1],
                 target_velocity_enu[2],
+                vehicle_penultimate_waypoint_enu[0],
+                vehicle_penultimate_waypoint_enu[1],
+                vehicle_penultimate_waypoint_enu[2],
+                vehicle_final_waypoint_enu[0],
+                vehicle_final_waypoint_enu[1],
+                vehicle_final_waypoint_enu[2],
                 result.range_history[sample_index],
                 result.terminal_guidance_history[sample_index],
             ]
