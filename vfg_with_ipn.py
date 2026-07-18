@@ -15,6 +15,7 @@ from numpy.typing import NDArray
 Vector3 = NDArray[np.float64]
 SMALL_NUMBER = 1.0e-9
 LAUNCH_RECOMPUTE_INTERVAL_S = 1.0
+PRELAUNCH_TARGET_PROPAGATION_RATE_HZ = 10.0
 
 
 @dataclass
@@ -70,6 +71,14 @@ class EntityGuidanceResult:
 
 
 @dataclass
+class PrelaunchTargetPropagation:
+    time_history: NDArray[np.float64]
+    target_position_history_ned: NDArray[np.float64]
+    target_velocity_history_ned: NDArray[np.float64]
+    range_to_intercept_history: NDArray[np.float64]
+
+
+@dataclass
 class SimulationResult:
     time_history: NDArray[np.float64]
     vehicle_position_history_ned: NDArray[np.float64]
@@ -84,6 +93,7 @@ class SimulationResult:
     target_time_to_vehicle_final_waypoint_poca: float
     vehicle_time_to_final_waypoint: float
     vehicle_launch_time: float
+    prelaunch_target_propagations: list[PrelaunchTargetPropagation]
 
 
 def _as_vector3(values: Sequence[float], name: str) -> Vector3:
@@ -309,6 +319,45 @@ def compute_time_to_minimum_distance_from_point(
     )
 
     return max(0.0, time_to_minimum_distance)
+
+
+def compute_prelaunch_target_propagation(
+    target_position_ned: Vector3,
+    target_velocity_ned: Vector3,
+    intercept_point_ned: Vector3,
+    start_time: float,
+    propagation_duration: float,
+) -> PrelaunchTargetPropagation:
+    """Return a 10 Hz target propagation to the predicted intercept point."""
+    sample_time_step = 1.0 / PRELAUNCH_TARGET_PROPAGATION_RATE_HZ
+    sample_count = int(math.ceil(propagation_duration / sample_time_step)) + 1
+    elapsed_time_history = np.arange(sample_count, dtype=np.float64)
+    elapsed_time_history *= sample_time_step
+    elapsed_time_history = np.minimum(
+        elapsed_time_history,
+        propagation_duration,
+    )
+    time_history = start_time + elapsed_time_history
+    target_position_history_ned = (
+        target_position_ned
+        + elapsed_time_history[:, np.newaxis] * target_velocity_ned
+    )
+    target_velocity_history_ned = np.repeat(
+        target_velocity_ned[np.newaxis, :],
+        sample_count,
+        axis=0,
+    )
+    range_to_intercept_history = np.linalg.norm(
+        intercept_point_ned - target_position_history_ned,
+        axis=1,
+    )
+
+    return PrelaunchTargetPropagation(
+        time_history=time_history,
+        target_position_history_ned=target_position_history_ned,
+        target_velocity_history_ned=target_velocity_history_ned,
+        range_to_intercept_history=range_to_intercept_history,
+    )
 
 
 def compute_path_time_to_final_waypoint(config: GuidanceConfig) -> float:
@@ -896,6 +945,22 @@ def run_simulation(config: SimulationConfig) -> SimulationResult:
     vehicle_time_to_final_waypoint = compute_path_time_to_final_waypoint(
         config.vehicle
     )
+    prelaunch_target_propagations: list[PrelaunchTargetPropagation] = []
+
+    if 0.0 < config.vehicle_launch_time:
+        prelaunch_target_propagations.append(
+            compute_prelaunch_target_propagation(
+                target_position_ned=target_state.position_ned,
+                target_velocity_ned=compute_constant_heading_velocity_ned(
+                    config.target
+                ),
+                intercept_point_ned=config.vehicle.waypoints_ned[-1],
+                start_time=0.0,
+                propagation_duration=(
+                    target_time_to_vehicle_final_waypoint_poca
+                ),
+            )
+        )
 
     for _step in range(number_of_steps):
         current_time = time_history[valid_sample_count - 1]
@@ -963,6 +1028,17 @@ def run_simulation(config: SimulationConfig) -> SimulationResult:
                         target_position_ned=target_state.position_ned,
                         target_velocity_ned=target_velocity_ned,
                         current_time=poca_time,
+                    )
+                )
+                prelaunch_target_propagations.append(
+                    compute_prelaunch_target_propagation(
+                        target_position_ned=target_state.position_ned,
+                        target_velocity_ned=target_velocity_ned,
+                        intercept_point_ned=config.vehicle.waypoints_ned[-1],
+                        start_time=poca_time,
+                        propagation_duration=(
+                            target_time_to_vehicle_final_waypoint_poca
+                        ),
                     )
                 )
                 next_launch_time_recompute = (
@@ -1198,6 +1274,7 @@ def run_simulation(config: SimulationConfig) -> SimulationResult:
         ),
         vehicle_time_to_final_waypoint=vehicle_time_to_final_waypoint,
         vehicle_launch_time=config.vehicle_launch_time,
+        prelaunch_target_propagations=prelaunch_target_propagations,
     )
 
 
@@ -1293,6 +1370,104 @@ def write_translational_state_out(
             )
 
 
+def write_prelaunch_target_propagations_out(
+    output_path: Path,
+    config: SimulationConfig,
+    result: SimulationResult,
+) -> None:
+    """Write all pre-launch target propagations at 10 Hz."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    variable_names = [
+        "time",
+        "vehiclePositionEast",
+        "vehiclePositionNorth",
+        "vehiclePositionUp",
+        "vehicleVelocityEast",
+        "vehicleVelocityNorth",
+        "vehicleVelocityUp",
+        "targetPositionEast",
+        "targetPositionNorth",
+        "targetPositionUp",
+        "targetVelocityEast",
+        "targetVelocityNorth",
+        "targetVelocityUp",
+        "vehicleToTargetRange",
+        "integratedPNActive",
+    ]
+
+    variable_units = [
+        "s",
+        "m",
+        "m",
+        "m",
+        "m/s",
+        "m/s",
+        "m/s",
+        "m",
+        "m",
+        "m",
+        "m/s",
+        "m/s",
+        "m/s",
+        "m",
+        "nd",
+    ]
+
+    with output_path.open("w", encoding="utf-8", newline="\n") as output_file:
+        output_file.write(
+            f"{len(result.prelaunch_target_propagations)} Total Datasets "
+            f"BetaFlight INS V{config.version} "
+            f"Scenario Title: {config.scenario_title} "
+            f"Classification: {config.classification}\n"
+        )
+
+        vehicle_position_enu = ned_to_enu(config.vehicle.waypoints_ned[-1])
+        vehicle_velocity_enu = np.zeros(3, dtype=np.float64)
+
+        for propagation_index, propagation in enumerate(
+            result.prelaunch_target_propagations,
+            start=1,
+        ):
+            output_file.write(
+                f"dataset: {config.dataset_name} "
+                f"prelaunchTargetPropagation{propagation_index}\n"
+            )
+            output_file.write(f"{len(variable_names)}\n")
+            output_file.write("\t".join(variable_names) + "\n")
+            output_file.write("\t".join(variable_units) + "\n")
+
+            for sample_index in range(len(propagation.time_history)):
+                target_position_enu = ned_to_enu(
+                    propagation.target_position_history_ned[sample_index]
+                )
+                target_velocity_enu = ned_to_enu(
+                    propagation.target_velocity_history_ned[sample_index]
+                )
+
+                row = [
+                    propagation.time_history[sample_index],
+                    vehicle_position_enu[0],
+                    vehicle_position_enu[1],
+                    vehicle_position_enu[2],
+                    vehicle_velocity_enu[0],
+                    vehicle_velocity_enu[1],
+                    vehicle_velocity_enu[2],
+                    target_position_enu[0],
+                    target_position_enu[1],
+                    target_position_enu[2],
+                    target_velocity_enu[0],
+                    target_velocity_enu[1],
+                    target_velocity_enu[2],
+                    propagation.range_to_intercept_history[sample_index],
+                    0.0,
+                ]
+
+                output_file.write(
+                    "\t".join(f"{value:.9f}" for value in row) + "\n"
+                )
+
+
 def resolve_output_path(
     config: SimulationConfig,
     input_path: Path,
@@ -1305,6 +1480,15 @@ def resolve_output_path(
         return config.output_file
 
     return input_path.parent / config.output_file
+
+
+def resolve_prelaunch_target_propagations_output_path(
+    output_path: Path,
+) -> Path:
+    return output_path.with_name(
+        f"{output_path.stem}_prelaunch_target_propagations"
+        f"{output_path.suffix}"
+    )
 
 
 def main() -> None:
@@ -1341,6 +1525,14 @@ def main() -> None:
         config=config,
         result=result,
     )
+    prelaunch_target_propagations_output_path = (
+        resolve_prelaunch_target_propagations_output_path(output_path)
+    )
+    write_prelaunch_target_propagations_out(
+        output_path=prelaunch_target_propagations_output_path,
+        config=config,
+        result=result,
+    )
 
     print(
         "Target time to minimum distance from vehicle final waypoint: "
@@ -1366,6 +1558,12 @@ def main() -> None:
     print(f"POCA time: {result.poca_time:.9f} s")
     print(f"Vehicle-to-target range at POCA: {result.poca_range:.9f} m")
     print(f"Wrote {len(result.time_history)} samples to {output_path}")
+    print(
+        "Wrote "
+        f"{len(result.prelaunch_target_propagations)} "
+        "prelaunch target propagations to "
+        f"{prelaunch_target_propagations_output_path}"
+    )
 
 
 if __name__ == "__main__":
