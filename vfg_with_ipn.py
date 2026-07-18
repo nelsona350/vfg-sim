@@ -459,7 +459,7 @@ def compute_entity_guidance(
 
     if waypoint_index >= len(config.waypoints_ned):
         return EntityGuidanceResult(
-            velocity_ned=np.zeros(3, dtype=np.float64),
+            velocity_ned=state.velocity_ned,
             waypoint_index=waypoint_index,
         )
 
@@ -492,8 +492,9 @@ def compute_entity_guidance(
         waypoint_index += 1
 
         if waypoint_index >= len(config.waypoints_ned):
+            print("Passed final waypoint, holding velocity until terminal mode.")
             return EntityGuidanceResult(
-                velocity_ned=np.zeros(3, dtype=np.float64),
+                velocity_ned=state.velocity_ned,
                 waypoint_index=waypoint_index,
             )
 
