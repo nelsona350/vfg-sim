@@ -48,7 +48,8 @@
       "terminal_range_m": 200.0,
       "horizontal_navigation_constant": 3.0,
       "vertical_navigation_constant": 3.0
-    }
+    },
+    "launch_time_s": 0.0
   },
   "target": {
     "initial_position_ned": [

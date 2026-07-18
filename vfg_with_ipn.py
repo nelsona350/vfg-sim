@@ -40,6 +40,7 @@ class SimulationConfig:
     classification: str
     dataset_name: str
 
+    vehicle_launch_time: float
     vehicle: GuidanceConfig
     target: GuidanceConfig
     integrated_pn: IntegratedPNConfig
@@ -128,6 +129,14 @@ def _validate_config(config: SimulationConfig) -> None:
     if config.simulation_duration <= 0.0:
         raise ValueError("simulation_duration must be positive.")
 
+    if config.vehicle_launch_time < 0.0:
+        raise ValueError("vehicle.launch_time_s must be nonnegative.")
+
+    if config.vehicle_launch_time >= config.simulation_duration:
+        raise ValueError(
+            "vehicle.launch_time_s must be less than simulation_duration."
+        )
+
     if config.integrated_pn.terminal_range <= 0.0:
         raise ValueError("integrated_pn.terminal_range must be positive.")
 
@@ -183,6 +192,7 @@ def load_json_config(input_path: Path) -> SimulationConfig:
         scenario_title=str(metadata.get("scenario_title", "TBolt")),
         classification=str(metadata.get("classification", "UNCLASSIFIED")),
         dataset_name=str(metadata.get("dataset_name", "Thunderbolt")),
+        vehicle_launch_time=float(data["vehicle"].get("launch_time_s", 0.0)),
         vehicle=_load_json_guidance(data["vehicle"], "vehicle"),
         target=_load_json_guidance(data["target"], "target"),
         integrated_pn=IntegratedPNConfig(
@@ -214,6 +224,15 @@ def _require_text(parent: ET.Element, tag: str) -> str:
 
     if child is None or child.text is None:
         raise ValueError(f"Missing XML element: {tag}")
+
+    return child.text.strip()
+
+
+def _optional_text(parent: ET.Element, tag: str, default: str) -> str:
+    child = parent.find(tag)
+
+    if child is None or child.text is None:
+        return default
 
     return child.text.strip()
 
@@ -309,6 +328,9 @@ def load_xml_config(input_path: Path) -> SimulationConfig:
         scenario_title=_require_text(metadata, "scenario_title"),
         classification=_require_text(metadata, "classification"),
         dataset_name=_require_text(metadata, "dataset_name"),
+        vehicle_launch_time=float(
+            _optional_text(vehicle, "launch_time_s", "0.0")
+        ),
         vehicle=_load_xml_guidance(vehicle, "vehicle"),
         target=_load_xml_guidance(target, "target"),
         integrated_pn=IntegratedPNConfig(
@@ -694,6 +716,48 @@ def run_simulation(config: SimulationConfig) -> SimulationResult:
         )
         target_state.waypoint_index = target_guidance.waypoint_index
         target_velocity_ned = target_guidance.velocity_ned
+
+        if current_time < config.vehicle_launch_time:
+            vehicle_velocity_ned = np.zeros(3, dtype=np.float64)
+            vehicle_state.velocity_ned = vehicle_velocity_ned.copy()
+            integration_time = min(
+                config.time_step,
+                config.vehicle_launch_time - current_time,
+            )
+
+            target_state.position_ned = (
+                target_state.position_ned
+                + target_velocity_ned * integration_time
+            )
+
+            sample_index = valid_sample_count
+            time_history[sample_index] = current_time + integration_time
+            vehicle_position_history_ned[sample_index] = (
+                vehicle_state.position_ned
+            )
+            vehicle_velocity_history_ned[sample_index] = vehicle_velocity_ned
+            target_position_history_ned[sample_index] = (
+                target_state.position_ned
+            )
+            target_velocity_history_ned[sample_index] = target_velocity_ned
+
+            relative_position_at_sample = (
+                target_state.position_ned - vehicle_state.position_ned
+            )
+            range_history[sample_index] = np.linalg.norm(
+                relative_position_at_sample
+            )
+            terminal_guidance_history[sample_index] = 0.0
+
+            valid_sample_count += 1
+
+            poca_time = float(time_history[sample_index])
+            poca_range = float(range_history[sample_index])
+
+            if poca_time >= config.simulation_duration:
+                break
+
+            continue
 
         relative_position_ned = (
             target_state.position_ned - vehicle_state.position_ned
