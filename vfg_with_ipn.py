@@ -14,6 +14,7 @@ from numpy.typing import NDArray
 
 Vector3 = NDArray[np.float64]
 SMALL_NUMBER = 1.0e-9
+LAUNCH_RECOMPUTE_INTERVAL_S = 1.0
 
 
 @dataclass
@@ -80,6 +81,9 @@ class SimulationResult:
     poca_time: float
     poca_range: float
     terminal_guidance_activation_time: float | None
+    target_time_to_vehicle_final_waypoint_poca: float
+    vehicle_time_to_final_waypoint: float
+    vehicle_launch_time: float
 
 
 def _as_vector3(values: Sequence[float], name: str) -> Vector3:
@@ -265,13 +269,17 @@ def compute_path_time_to_final_waypoint(config: GuidanceConfig) -> float:
     return total_path_length / config.desired_flight_speed
 
 
-def compute_synchronized_vehicle_launch_time(config: SimulationConfig) -> float:
-    """Launch the vehicle so it reaches its final waypoint with the target."""
+def compute_synchronized_vehicle_launch_timing_from_target_state(
+    config: SimulationConfig,
+    target_position_ned: Vector3,
+    target_velocity_ned: Vector3,
+    current_time: float,
+) -> tuple[float, float, float]:
+    """Return target POCA, vehicle path time, and launch time."""
     vehicle_final_waypoint_ned = config.vehicle.waypoints_ned[-1]
-    target_velocity_ned = compute_constant_heading_velocity_ned(config.target)
     target_time_to_vehicle_final_waypoint_poca = (
         compute_time_to_minimum_distance_from_point(
-            initial_position_ned=config.target.initial_position_ned,
+            initial_position_ned=target_position_ned,
             velocity_ned=target_velocity_ned,
             point_ned=vehicle_final_waypoint_ned,
         )
@@ -280,11 +288,49 @@ def compute_synchronized_vehicle_launch_time(config: SimulationConfig) -> float:
         config.vehicle
     )
     vehicle_launch_time = (
-        target_time_to_vehicle_final_waypoint_poca
+        current_time
+        + target_time_to_vehicle_final_waypoint_poca
         - vehicle_time_to_final_waypoint
     )
 
+    return (
+        target_time_to_vehicle_final_waypoint_poca,
+        vehicle_time_to_final_waypoint,
+        vehicle_launch_time,
+    )
+
+
+def compute_synchronized_vehicle_launch_time_from_target_state(
+    config: SimulationConfig,
+    target_position_ned: Vector3,
+    target_velocity_ned: Vector3,
+    current_time: float,
+) -> float:
+    """Return launch time from a target state and current simulation time."""
+    (
+        _target_time_to_vehicle_final_waypoint_poca,
+        _vehicle_time_to_final_waypoint,
+        vehicle_launch_time,
+    ) = compute_synchronized_vehicle_launch_timing_from_target_state(
+        config=config,
+        target_position_ned=target_position_ned,
+        target_velocity_ned=target_velocity_ned,
+        current_time=current_time,
+    )
+
     return vehicle_launch_time
+
+
+def compute_synchronized_vehicle_launch_time(config: SimulationConfig) -> float:
+    """Launch the vehicle so it reaches its final waypoint with the target."""
+    target_velocity_ned = compute_constant_heading_velocity_ned(config.target)
+
+    return compute_synchronized_vehicle_launch_time_from_target_state(
+        config=config,
+        target_position_ned=config.target.initial_position_ned,
+        target_velocity_ned=target_velocity_ned,
+        current_time=0.0,
+    )
 
 
 def _require_text(parent: ET.Element, tag: str) -> str:
@@ -739,8 +785,12 @@ def ned_to_enu(vector_ned: Vector3) -> Vector3:
 
 
 def run_simulation(config: SimulationConfig) -> SimulationResult:
+    sample_time_step = min(
+        config.time_step,
+        LAUNCH_RECOMPUTE_INTERVAL_S,
+    )
     number_of_steps = int(
-        math.ceil(config.simulation_duration / config.time_step)
+        math.ceil(config.simulation_duration / sample_time_step)
     )
     maximum_samples = number_of_steps + 2
 
@@ -779,6 +829,17 @@ def run_simulation(config: SimulationConfig) -> SimulationResult:
     poca_time = 0.0
     poca_range = float(range_history[0])
     terminal_guidance_activation_time: float | None = None
+    next_launch_time_recompute = LAUNCH_RECOMPUTE_INTERVAL_S
+    target_time_to_vehicle_final_waypoint_poca = (
+        compute_time_to_minimum_distance_from_point(
+            initial_position_ned=target_state.position_ned,
+            velocity_ned=compute_constant_heading_velocity_ned(config.target),
+            point_ned=config.vehicle.waypoints_ned[-1],
+        )
+    )
+    vehicle_time_to_final_waypoint = compute_path_time_to_final_waypoint(
+        config.vehicle
+    )
 
     for _step in range(number_of_steps):
         current_time = time_history[valid_sample_count - 1]
@@ -796,6 +857,7 @@ def run_simulation(config: SimulationConfig) -> SimulationResult:
             integration_time = min(
                 config.time_step,
                 config.vehicle_launch_time - current_time,
+                next_launch_time_recompute - current_time,
             )
 
             target_state.position_ned = (
@@ -826,6 +888,26 @@ def run_simulation(config: SimulationConfig) -> SimulationResult:
 
             poca_time = float(time_history[sample_index])
             poca_range = float(range_history[sample_index])
+
+            if (
+                poca_time >= next_launch_time_recompute
+                and poca_time < config.vehicle_launch_time
+            ):
+                (
+                    target_time_to_vehicle_final_waypoint_poca,
+                    vehicle_time_to_final_waypoint,
+                    config.vehicle_launch_time,
+                ) = (
+                    compute_synchronized_vehicle_launch_timing_from_target_state(
+                        config=config,
+                        target_position_ned=target_state.position_ned,
+                        target_velocity_ned=target_velocity_ned,
+                        current_time=poca_time,
+                    )
+                )
+                next_launch_time_recompute = (
+                    poca_time + LAUNCH_RECOMPUTE_INTERVAL_S
+                )
 
             if poca_time >= config.simulation_duration:
                 break
@@ -1051,6 +1133,11 @@ def run_simulation(config: SimulationConfig) -> SimulationResult:
         terminal_guidance_activation_time=(
             terminal_guidance_activation_time
         ),
+        target_time_to_vehicle_final_waypoint_poca=(
+            target_time_to_vehicle_final_waypoint_poca
+        ),
+        vehicle_time_to_final_waypoint=vehicle_time_to_final_waypoint,
+        vehicle_launch_time=config.vehicle_launch_time,
     )
 
 
@@ -1195,31 +1282,17 @@ def main() -> None:
         result=result,
     )
 
-    target_velocity_ned = compute_constant_heading_velocity_ned(
-        config.target
-    )
-    target_time_to_vehicle_final_waypoint_poca = (
-        compute_time_to_minimum_distance_from_point(
-            initial_position_ned=config.target.initial_position_ned,
-            velocity_ned=target_velocity_ned,
-            point_ned=config.vehicle.waypoints_ned[-1],
-        )
-    )
-    vehicle_time_to_final_waypoint = compute_path_time_to_final_waypoint(
-        config.vehicle
-    )
-
     print(
         "Target time to minimum distance from vehicle final waypoint: "
-        f"{target_time_to_vehicle_final_waypoint_poca:.9f} s"
+        f"{result.target_time_to_vehicle_final_waypoint_poca:.9f} s"
     )
     print(
         "Vehicle time through all waypoints to final waypoint: "
-        f"{vehicle_time_to_final_waypoint:.9f} s"
+        f"{result.vehicle_time_to_final_waypoint:.9f} s"
     )
     print(
         "Computed synchronized vehicle launch time: "
-        f"{config.vehicle_launch_time:.9f} s"
+        f"{result.vehicle_launch_time:.9f} s"
     )
 
     if result.terminal_guidance_activation_time is None:
