@@ -129,9 +129,6 @@ def _validate_config(config: SimulationConfig) -> None:
     if config.simulation_duration <= 0.0:
         raise ValueError("simulation_duration must be positive.")
 
-    if config.vehicle_launch_time < 0.0:
-        raise ValueError("vehicle.launch_time_s must be nonnegative.")
-
     if config.vehicle_launch_time >= config.simulation_duration:
         raise ValueError(
             "vehicle.launch_time_s must be less than simulation_duration."
@@ -215,8 +212,79 @@ def load_json_config(input_path: Path) -> SimulationConfig:
         output_file=Path(simulation.get("output_file", "vfg_state.out")),
     )
 
+    config.vehicle_launch_time = compute_synchronized_vehicle_launch_time(
+        config
+    )
+
     _validate_config(config)
     return config
+
+
+def compute_constant_heading_velocity_ned(
+    config: GuidanceConfig,
+) -> Vector3:
+    """Return constant-velocity target propagation along its first leg."""
+    path_vector_ned = config.waypoints_ned[0] - config.initial_position_ned
+    path_length = float(np.linalg.norm(path_vector_ned))
+
+    if path_length <= SMALL_NUMBER:
+        raise ValueError(
+            "Cannot determine constant heading from an initial position "
+            "coincident with the first waypoint."
+        )
+
+    return config.desired_flight_speed * path_vector_ned / path_length
+
+
+def compute_time_to_minimum_distance_from_point(
+    initial_position_ned: Vector3,
+    velocity_ned: Vector3,
+    point_ned: Vector3,
+) -> float:
+    """Return the future time at closest approach to a fixed point."""
+    speed_squared = float(np.dot(velocity_ned, velocity_ned))
+
+    if speed_squared <= SMALL_NUMBER:
+        raise ValueError("Velocity must be nonzero for closest-approach time.")
+
+    time_to_minimum_distance = float(
+        np.dot(point_ned - initial_position_ned, velocity_ned)
+        / speed_squared
+    )
+
+    return max(0.0, time_to_minimum_distance)
+
+
+def compute_path_time_to_final_waypoint(config: GuidanceConfig) -> float:
+    """Return travel time from initial position through all waypoints."""
+    path_points = np.vstack((config.initial_position_ned, config.waypoints_ned))
+    segment_vectors = np.diff(path_points, axis=0)
+    segment_lengths = np.linalg.norm(segment_vectors, axis=1)
+    total_path_length = float(np.sum(segment_lengths))
+
+    return total_path_length / config.desired_flight_speed
+
+
+def compute_synchronized_vehicle_launch_time(config: SimulationConfig) -> float:
+    """Launch the vehicle so it reaches its final waypoint with the target."""
+    vehicle_final_waypoint_ned = config.vehicle.waypoints_ned[-1]
+    target_velocity_ned = compute_constant_heading_velocity_ned(config.target)
+    target_time_to_vehicle_final_waypoint_poca = (
+        compute_time_to_minimum_distance_from_point(
+            initial_position_ned=config.target.initial_position_ned,
+            velocity_ned=target_velocity_ned,
+            point_ned=vehicle_final_waypoint_ned,
+        )
+    )
+    vehicle_time_to_final_waypoint = compute_path_time_to_final_waypoint(
+        config.vehicle
+    )
+    vehicle_launch_time = (
+        target_time_to_vehicle_final_waypoint_poca
+        - vehicle_time_to_final_waypoint
+    )
+
+    return vehicle_launch_time
 
 
 def _require_text(parent: ET.Element, tag: str) -> str:
@@ -353,6 +421,10 @@ def load_xml_config(input_path: Path) -> SimulationConfig:
         time_step=float(_require_text(simulation, "time_step_s")),
         simulation_duration=float(_require_text(simulation, "duration_s")),
         output_file=Path(_require_text(simulation, "output_file")),
+    )
+
+    config.vehicle_launch_time = compute_synchronized_vehicle_launch_time(
+        config
     )
 
     _validate_config(config)
@@ -1121,6 +1193,33 @@ def main() -> None:
         output_path=output_path,
         config=config,
         result=result,
+    )
+
+    target_velocity_ned = compute_constant_heading_velocity_ned(
+        config.target
+    )
+    target_time_to_vehicle_final_waypoint_poca = (
+        compute_time_to_minimum_distance_from_point(
+            initial_position_ned=config.target.initial_position_ned,
+            velocity_ned=target_velocity_ned,
+            point_ned=config.vehicle.waypoints_ned[-1],
+        )
+    )
+    vehicle_time_to_final_waypoint = compute_path_time_to_final_waypoint(
+        config.vehicle
+    )
+
+    print(
+        "Target time to minimum distance from vehicle final waypoint: "
+        f"{target_time_to_vehicle_final_waypoint_poca:.9f} s"
+    )
+    print(
+        "Vehicle time through all waypoints to final waypoint: "
+        f"{vehicle_time_to_final_waypoint:.9f} s"
+    )
+    print(
+        "Computed synchronized vehicle launch time: "
+        f"{config.vehicle_launch_time:.9f} s"
     )
 
     if result.terminal_guidance_activation_time is None:
