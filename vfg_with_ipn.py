@@ -240,6 +240,58 @@ def compute_constant_heading_velocity_ned(
     return config.desired_flight_speed * path_vector_ned / path_length
 
 
+def align_vehicle_penultimate_waypoint_with_target_approach(
+    config: SimulationConfig,
+    target_velocity_ned: Vector3,
+) -> None:
+    """
+    Move the vehicle's next-to-last waypoint so its final leg approaches the
+    predicted intercept point anti-parallel to the target's propagation.
+
+    The vehicle's final waypoint is the predicted intercept point used by the
+    launch synchronization logic.  Keeping the final leg length unchanged while
+    rotating it about that final waypoint preserves the configured terminal
+    geometry scale, but makes the vehicle's direction from the next-to-last
+    waypoint to the final waypoint oppose the target's current pre-launch
+    propagation direction.
+    """
+    if (
+        config.vehicle.waypoints_ned.ndim != 2
+        or config.vehicle.waypoints_ned.shape[1] != 3
+        or len(config.vehicle.waypoints_ned) < 2
+    ):
+        raise ValueError(
+            "Vehicle waypoints must have shape (N, 3) with at least two "
+            "waypoints to align vehicle approach."
+        )
+
+    target_speed = float(np.linalg.norm(target_velocity_ned))
+
+    if target_speed <= SMALL_NUMBER:
+        raise ValueError(
+            "Target velocity must be nonzero to align vehicle approach."
+        )
+
+    vehicle_final_waypoint_ned = config.vehicle.waypoints_ned[-1]
+    vehicle_penultimate_waypoint_ned = config.vehicle.waypoints_ned[-2]
+    final_leg_vector_ned = (
+        vehicle_final_waypoint_ned - vehicle_penultimate_waypoint_ned
+    )
+    final_leg_length = float(np.linalg.norm(final_leg_vector_ned))
+
+    if final_leg_length <= SMALL_NUMBER:
+        raise ValueError(
+            "Vehicle final and next-to-last waypoints must be distinct "
+            "to align vehicle approach."
+        )
+
+    target_direction_ned = target_velocity_ned / target_speed
+
+    config.vehicle.waypoints_ned[-2] = (
+        vehicle_final_waypoint_ned + target_direction_ned * final_leg_length
+    )
+
+
 def compute_time_to_minimum_distance_from_point(
     initial_position_ned: Vector3,
     velocity_ned: Vector3,
@@ -324,6 +376,10 @@ def compute_synchronized_vehicle_launch_time_from_target_state(
 def compute_synchronized_vehicle_launch_time(config: SimulationConfig) -> float:
     """Launch the vehicle so it reaches its final waypoint with the target."""
     target_velocity_ned = compute_constant_heading_velocity_ned(config.target)
+    align_vehicle_penultimate_waypoint_with_target_approach(
+        config,
+        target_velocity_ned,
+    )
 
     return compute_synchronized_vehicle_launch_time_from_target_state(
         config=config,
@@ -893,6 +949,10 @@ def run_simulation(config: SimulationConfig) -> SimulationResult:
                 poca_time >= next_launch_time_recompute
                 and poca_time < config.vehicle_launch_time
             ):
+                align_vehicle_penultimate_waypoint_with_target_approach(
+                    config,
+                    target_velocity_ned,
+                )
                 (
                     target_time_to_vehicle_final_waypoint_poca,
                     vehicle_time_to_final_waypoint,
