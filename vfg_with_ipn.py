@@ -1332,6 +1332,12 @@ def write_translational_state_out(
         "targetVelocityEast",
         "targetVelocityNorth",
         "targetVelocityUp",
+        "vehiclePenultimateWaypointEast",
+        "vehiclePenultimateWaypointNorth",
+        "vehiclePenultimateWaypointUp",
+        "vehicleFinalWaypointEast",
+        "vehicleFinalWaypointNorth",
+        "vehicleFinalWaypointUp",
         "vehicleToTargetRange",
         "integratedPNActive",
     ]
@@ -1351,6 +1357,12 @@ def write_translational_state_out(
         "m/s",
         "m/s",
         "m",
+        "m",
+        "m",
+        "m",
+        "m",
+        "m",
+        "m",
         "nd",
     ]
 
@@ -1365,6 +1377,13 @@ def write_translational_state_out(
         output_file.write(f"{len(variable_names)}\n")
         output_file.write("\t".join(variable_names) + "\n")
         output_file.write("\t".join(variable_units) + "\n")
+
+        vehicle_penultimate_waypoint_enu = ned_to_enu(
+            config.vehicle.waypoints_ned[-2]
+        )
+        vehicle_final_waypoint_enu = ned_to_enu(
+            config.vehicle.waypoints_ned[-1]
+        )
 
         for sample_index in range(len(result.time_history)):
             vehicle_position_enu = ned_to_enu(
@@ -1394,6 +1413,12 @@ def write_translational_state_out(
                 target_velocity_enu[0],
                 target_velocity_enu[1],
                 target_velocity_enu[2],
+                vehicle_penultimate_waypoint_enu[0],
+                vehicle_penultimate_waypoint_enu[1],
+                vehicle_penultimate_waypoint_enu[2],
+                vehicle_final_waypoint_enu[0],
+                vehicle_final_waypoint_enu[1],
+                vehicle_final_waypoint_enu[2],
                 result.range_history[sample_index],
                 result.terminal_guidance_history[sample_index],
             ]
