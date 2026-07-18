@@ -1,0 +1,88 @@
+{
+  "metadata": {
+    "version": "1.5",
+    "scenario_title": "TBolt",
+    "classification": "UNCLASSIFIED",
+    "dataset_name": "Thunderbolt"
+  },
+  "simulation": {
+    "time_step_s": 0.05,
+    "duration_s": 120.0,
+    "output_file": "test.out"
+  },
+  "vehicle": {
+    "initial_position_ned": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "guidance": {
+      "desired_flight_speed_mps": 50.0,
+      "max_waypoint_intercept_angle_deg": 60.0,
+      "convergence_time_constant_s": 3.0,
+      "waypoint_plane_tolerance_m": 0.0
+    },
+    "waypoints_ned": [
+      [
+        0.0,
+        0.0,
+        -100.0
+      ],
+      [
+        250.0,
+        -250.0,
+        -100.0
+      ],
+      [
+        500.0,
+        -100.0,
+        -100.0
+      ],
+      [
+        500.0,
+        200.0,
+        -100.0
+      ]
+    ],
+    "integrated_proportional_navigation": {
+      "terminal_range_m": 200.0,
+      "horizontal_navigation_constant": 3.0,
+      "vertical_navigation_constant": 3.0
+    }
+  },
+  "target": {
+    "initial_position_ned": [
+      500.0,
+      600.0,
+      -120.0
+    ],
+    "guidance": {
+      "desired_flight_speed_mps": 32.0,
+      "max_waypoint_intercept_angle_deg": 50.0,
+      "convergence_time_constant_s": 3.0,
+      "waypoint_plane_tolerance_m": 0.0
+    },
+    "waypoints_ned": [
+      [
+        500.0,
+        300.0,
+        -120.0
+      ],
+      [
+        500.0,
+        100.0,
+        -120.0
+      ],
+      [
+        500.0,
+        0.0,
+        -110.0
+      ],
+      [
+        0.0,
+        0.0,
+        -110.0
+      ]
+    ]
+  }
+}
