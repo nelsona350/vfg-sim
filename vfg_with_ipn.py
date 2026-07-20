@@ -163,7 +163,6 @@ def _validate_config(config: SimulationConfig) -> None:
         )
 
 
-
 def _load_json_guidance(
     data: dict[str, Any],
     entity_name: str,
@@ -335,6 +334,8 @@ def compute_time_to_intercept_moving_target(
         intercept_time = -constant_coefficient / linear_coefficient
         return max(0.0, intercept_time)
 
+    # The discriminant decides whether the quadratic intercept equation
+    # has real roots; if not, use closest approach as the fallback.
     discriminant = (
         linear_coefficient**2
         - 4.0 * closing_quadratic_coefficient * constant_coefficient
@@ -423,11 +424,15 @@ def compute_prelaunch_target_propagation(
     sample_count = int(math.ceil(propagation_duration / sample_time_step)) + 1
     elapsed_time_history = np.arange(sample_count, dtype=np.float64)
     elapsed_time_history *= sample_time_step
+    # Clamp the final sample to the exact propagation duration so the
+    # history always terminates at the predicted intercept/POCA time.
     elapsed_time_history = np.minimum(
         elapsed_time_history,
         propagation_duration,
     )
     time_history = start_time + elapsed_time_history
+    # Add a singleton column to broadcast every scalar elapsed time across
+    # the three NED components of the constant target velocity.
     target_position_history_ned = (
         target_position_ned
         + elapsed_time_history[:, np.newaxis] * target_velocity_ned
@@ -511,6 +516,8 @@ def update_target_prediction_and_vehicle_waypoint(
 
 def compute_path_time_to_final_waypoint(config: GuidanceConfig) -> float:
     """Return travel time from initial position through all waypoints."""
+    # Stack the initial position ahead of the configured waypoints so diff()
+    # returns every leg in the planned route.
     path_points = np.vstack((config.initial_position_ned, config.waypoints_ned))
     segment_vectors = np.diff(path_points, axis=0)
     segment_lengths = np.linalg.norm(segment_vectors, axis=1)
@@ -782,6 +789,8 @@ def compute_velocity_command_ned(
         )
     )
 
+    # Keep the closest-point projection on the finite segment instead of the
+    # infinite line through the waypoints.
     clamped_along_track_distance = float(
         np.clip(along_track_distance, 0.0, path_length)
     )
@@ -793,6 +802,8 @@ def compute_velocity_command_ned(
 
     path_error_ned = position_ned - closest_path_position_ned
 
+    # Remove any along-track component, leaving only lateral/vertical miss
+    # distance from the current route segment.
     cross_track_error_ned = (
         path_error_ned
         - np.dot(path_error_ned, path_direction_ned) * path_direction_ned
@@ -808,6 +819,8 @@ def compute_velocity_command_ned(
         convergence_time_constant * desired_flight_speed
     )
 
+    # tanh() smoothly schedules small corrections near the path and saturates
+    # at the configured maximum intercept angle for large cross-track errors.
     intercept_angle = (
         max_waypoint_intercept_angle
         * math.tanh(cross_track_error / convergence_distance)
@@ -894,7 +907,6 @@ def compute_entity_guidance(
         velocity_ned=velocity_command_ned,
         waypoint_index=waypoint_index,
     )
-
 
 
 def wrap_to_pi(angle: float) -> float:
@@ -1028,7 +1040,6 @@ def compute_two_angle_integrated_pn_velocity_ned(
         commanded_heading_rad,
         commanded_flight_path_angle_rad,
     )
-
 
 
 def ned_to_enu(vector_ned: Vector3) -> Vector3:
@@ -1383,6 +1394,8 @@ def run_simulation(config: SimulationConfig) -> SimulationResult:
         )
 
         if relative_speed_squared > SMALL_NUMBER:
+            # Project relative position onto relative velocity to find the
+            # within-step time of closest approach for constant velocities.
             time_to_step_poca = -float(
                 np.dot(relative_position_ned, relative_velocity_ned)
             ) / relative_speed_squared
@@ -1724,6 +1737,7 @@ def main() -> None:
         config=config,
         result=result,
     )
+
     prelaunch_target_propagations_output_path = (
         resolve_prelaunch_target_propagations_output_path(output_path)
     )
